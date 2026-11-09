@@ -16,4 +16,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "NEXGUARD"
+
 include(":app")
+
+project(":app").projectDir = file("android/android/app")
