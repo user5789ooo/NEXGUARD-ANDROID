@@ -539,7 +539,9 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(
                 this,
                 LocationTrackingService::class.java
-            )
+            ).apply {
+                action = LocationTrackingService.ACTION_START
+            }
 
             ContextCompat.startForegroundService(this, intent)
 
@@ -560,12 +562,30 @@ class MainActivity : AppCompatActivity() {
             this,
             LocationTrackingService::class.java
         ).apply {
-            action = "STOP_TRACKING"
+            action = LocationTrackingService.ACTION_STOP
         }
 
-        startService(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startService(intent)
+        } else {
+            startService(intent)
+        }
 
-        consentCheck.isChecked = false
+        if (::consentCheck.isInitialized) {
+            consentCheck.setOnCheckedChangeListener(null)
+            consentCheck.isChecked = false
+            consentCheck.setOnCheckedChangeListener { _, checked ->
+                prefs.edit()
+                    .putBoolean("location_consent", checked)
+                    .apply()
+
+                if (!checked) {
+                    stopTracking()
+                }
+
+                updateScreen()
+            }
+        }
 
         toast("Location sharing stopped")
         updateScreen()
