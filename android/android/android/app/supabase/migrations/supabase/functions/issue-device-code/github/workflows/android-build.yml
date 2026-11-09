@@ -1,3 +1,4 @@
+
 name: NEXGUARD Android Build
 
 on:
@@ -24,7 +25,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Gradle 8.9
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
@@ -33,9 +34,15 @@ jobs:
         working-directory: android
         run: gradle :app:assembleDebug
 
+      - name: Verify APK
+        run: |
+          find android -type f -name "app-debug.apk"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NEXGUARD-debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/android/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 7
+          
