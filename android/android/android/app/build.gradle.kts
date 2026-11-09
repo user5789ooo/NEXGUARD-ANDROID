@@ -9,14 +9,23 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.nexguard.companion"
+        applicationId = "com.nexguard.companion.v2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
-        buildConfigField("String", "SUPABASE_URL", "\"https://sfygmyyupndinfyuivec.supabase.co\"")
-        buildConfigField("String", "SUPABASE_ANON_KEY", "\"sb_publishable_7j84isDkIbhGr0WuRS6UYQ_W-V4N8oe\"")
+        buildConfigField(
+            "String",
+            "SUPABASE_URL",
+            "\"https://sfygmyyupndinfyuivec.supabase.co\""
+        )
+
+        buildConfigField(
+            "String",
+            "SUPABASE_ANON_KEY",
+            "\"sb_publishable_7j84isDkIbhGr0WuRS6UYQ_W-V4N8oe\""
+        )
     }
 
     sourceSets {
