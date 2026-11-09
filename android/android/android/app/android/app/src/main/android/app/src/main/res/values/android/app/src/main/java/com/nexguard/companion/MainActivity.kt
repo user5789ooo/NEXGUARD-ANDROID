@@ -1,17 +1,21 @@
 package com.nexguard.companion
 
 import android.Manifest
-import android.content.*
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.os.*
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Bundle
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
-import okhttp3.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -20,6 +24,7 @@ import java.util.concurrent.TimeUnit
 class MainActivity : AppCompatActivity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     private val http = OkHttpClient.Builder()
         .callTimeout(25, TimeUnit.SECONDS)
         .build()
@@ -133,11 +138,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        ActivityCompat.requestPermissions(
-            this,
-            arrayOf(missing),
-            501
-        )
+        ActivityCompat.requestPermissions(this, arrayOf(missing), 501)
     }
 
     override fun onRequestPermissionsResult(
@@ -146,10 +147,7 @@ class MainActivity : AppCompatActivity() {
         results: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
-
-        if (requestCode == 501) {
-            updateStatus()
-        }
+        if (requestCode == 501) updateStatus()
     }
 
     private fun signIn() {
@@ -159,43 +157,30 @@ class MainActivity : AppCompatActivity() {
             .toString()
 
         task {
-            val j = post(
-                "/auth/v1/token?grant_type=password",
-                body,
-                false
-            )
-
+            val j = post("/auth/v1/token?grant_type=password", body, false)
             token = j.getString("access_token")
-
-            prefs.edit()
-                .putString("access_token", token)
-                .apply()
-
+            prefs.edit().putString("access_token", token).apply()
             "Signed in"
         }
     }
 
     private fun issueCode() {
-        if (token == null) {
-            return toast("Sign in first")
-        }
+        if (token == null) return toast("Sign in first")
 
         task {
             val j = post(
                 "/functions/v1/issue-device-code",
-                JSONObject()
-                    .put(
-                        "device_name",
-                        "${Build.MANUFACTURER} ${Build.MODEL}"
-                    )
-                    .toString()
+                JSONObject().put(
+                    "device_name",
+                    "${Build.MANUFACTURER} ${Build.MODEL}"
+                ).toString()
             )
 
             val code = j.getString("code")
 
             withContext(Dispatchers.Main) {
                 codeView.text =
-                    "Website connection code: $code\nExpires in 10 minutes • one use only"
+                    "Website connection code: $code\nExpires in 10 minutes"
             }
 
             "Connection code generated"
@@ -203,9 +188,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun syncTelemetry() {
-        if (token == null) {
-            return toast("Sign in first")
-        }
+        if (token == null) return toast("Sign in first")
 
         task {
             val user = get("/auth/v1/user")
@@ -215,23 +198,12 @@ class MainActivity : AppCompatActivity() {
                 IntentFilter(Intent.ACTION_BATTERY_CHANGED)
             )
 
-            val level = battery?.getIntExtra(
-                BatteryManager.EXTRA_LEVEL, -1
-            ) ?: -1
+            val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
 
-            val scale = battery?.getIntExtra(
-                BatteryManager.EXTRA_SCALE, -1
-            ) ?: -1
+            val percent = if (scale > 0) level * 100 / scale else -1
 
-            val percent = if (scale > 0) {
-                level * 100 / scale
-            } else {
-                -1
-            }
-
-            val state = battery?.getIntExtra(
-                BatteryManager.EXTRA_STATUS, -1
-            ) ?: -1
+            val state = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
 
             val charging =
                 state == BatteryManager.BATTERY_STATUS_CHARGING ||
@@ -264,35 +236,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun label(permission: String, name: String): String {
-        val granted = ContextCompat.checkSelfPermission(
-            this, permission
-        ) == PackageManager.PERMISSION_GRANTED
-
-        return "$name: " + if (granted) "Allowed" else "Not allowed"
-    }
-
     private fun updateStatus() {
+        fun permissionStatus(permission: String, name: String): String {
+            val granted = ContextCompat.checkSelfPermission(
+                this, permission
+            ) == PackageManager.PERMISSION_GRANTED
+
+            return "$name: ${if (granted) "Allowed" else "Not allowed"}"
+        }
+
         status.text = buildString {
-            appendLine(
-                "Account: ${if (token == null) "Signed out" else "Signed in"}"
-            )
-            appendLine(label(Manifest.permission.READ_CONTACTS, "Contacts"))
-            appendLine(label(Manifest.permission.RECORD_AUDIO, "Microphone"))
-            appendLine(label(Manifest.permission.ACCESS_FINE_LOCATION, "Location"))
-
+            appendLine("Account: ${if (token == null) "Signed out" else "Signed in"}")
+            appendLine(permissionStatus(Manifest.permission.READ_CONTACTS, "Contacts"))
+            appendLine(permissionStatus(Manifest.permission.RECORD_AUDIO, "Microphone"))
+            appendLine(permissionStatus(Manifest.permission.ACCESS_FINE_LOCATION, "Location"))
             if (Build.VERSION.SDK_INT >= 33) {
-                appendLine(
-                    label(
-                        Manifest.permission.POST_NOTIFICATIONS,
-                        "Notifications"
-                    )
-                )
+                appendLine(permissionStatus(Manifest.permission.POST_NOTIFICATIONS, "Notifications"))
             }
-
-            appendLine(
-                "Location/voice/file/contact data is not collected in this starter."
-            )
+            appendLine("Personal data is not collected in this starter.")
         }
     }
 
@@ -320,57 +281,36 @@ class MainActivity : AppCompatActivity() {
 
         val request = Request.Builder()
             .url(BuildConfig.SUPABASE_URL + path)
-            .post(
-                body.toRequestBody(
-                    "application/json".toMediaType()
-                )
-            )
+            .post(body.toRequestBody("application/json".toMediaType()))
             .header("apikey", BuildConfig.SUPABASE_ANON_KEY)
 
         if (auth) {
-            token?.let {
-                request.header("Authorization", "Bearer $it")
-            }
+            token?.let { request.header("Authorization", "Bearer $it") }
         }
 
-        headers.forEach { (key, value) ->
-            request.header(key, value)
-        }
+        headers.forEach { (key, value) -> request.header(key, value) }
 
         http.newCall(request.build()).execute().use { response ->
             val result = response.body?.string().orEmpty()
-
-            if (!response.isSuccessful) {
-                error("HTTP ${response.code}: $result")
-            }
-
+            if (!response.isSuccessful) error("HTTP ${response.code}: $result")
             if (result.isBlank()) JSONObject() else JSONObject(result)
         }
     }
 
-    private suspend fun get(path: String) =
-        withContext(Dispatchers.IO) {
+    private suspend fun get(path: String) = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(BuildConfig.SUPABASE_URL + path)
+            .get()
+            .header("apikey", BuildConfig.SUPABASE_ANON_KEY)
+            .header("Authorization", "Bearer ${token ?: ""}")
+            .build()
 
-            val request = Request.Builder()
-                .url(BuildConfig.SUPABASE_URL + path)
-                .get()
-                .header("apikey", BuildConfig.SUPABASE_ANON_KEY)
-                .header(
-                    "Authorization",
-                    "Bearer ${token ?: ""}"
-                )
-                .build()
-
-            http.newCall(request).execute().use { response ->
-                val result = response.body?.string().orEmpty()
-
-                if (!response.isSuccessful) {
-                    error("HTTP ${response.code}: $result")
-                }
-
-                JSONObject(result)
-            }
+        http.newCall(request).execute().use { response ->
+            val result = response.body?.string().orEmpty()
+            if (!response.isSuccessful) error("HTTP ${response.code}: $result")
+            JSONObject(result)
         }
+    }
 
     private fun busy(value: Boolean) {
         loginButton.isEnabled = !value
@@ -380,11 +320,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(message: String) {
-        Toast.makeText(
-            this,
-            message,
-            Toast.LENGTH_LONG
-        ).show()
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     override fun onDestroy() {
