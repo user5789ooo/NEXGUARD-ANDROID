@@ -15,26 +15,58 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
+import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class LocationTrackingService : Service() {
 
     companion object {
-        const val ACTION_START = "com.nexguard.companion.START_TRACKING"
-        const val ACTION_STOP = "com.nexguard.companion.STOP_TRACKING"
+        const val ACTION_START =
+            "com.nexguard.companion.START_TRACKING"
+
+        const val ACTION_STOP =
+            "com.nexguard.companion.STOP_TRACKING"
 
         private const val CHANNEL_ID = "nexguard_location"
         private const val NOTIFICATION_ID = 7001
-        private const val PREFS = "nexguard_prefs"
+
+        private const val PREFS = "nexguard"
         private const val PREF_CONSENT = "location_consent"
+
+        private const val BASE_URL =
+            "https://sfygmyyupndinfyuivec.supabase.co"
+
+        private const val API_KEY =
+            "sb_publishable_7j84isDkIbhGr0WuRS6UYQ_W-V4N8oe"
     }
 
     private lateinit var fusedClient: FusedLocationProviderClient
-    private lateinit var locationCallback: LocationCallback
+
+    private var locationCallback: LocationCallback? = null
+
+    private val serviceScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val http = OkHttpClient.Builder()
+        .callTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    private val prefs by lazy {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+    }
 
     override fun onCreate() {
         super.onCreate()
-        fusedClient = LocationServices.getFusedLocationProviderClient(this)
+
+        fusedClient =
+            LocationServices.getFusedLocationProviderClient(this)
+
         createNotificationChannel()
     }
 
@@ -44,41 +76,34 @@ class LocationTrackingService : Service() {
         startId: Int
     ): Int {
 
-        when (intent?.action) {
-            ACTION_STOP -> {
-                stopTracking()
-                return START_NOT_STICKY
-            }
+        val action = intent?.action
 
-            ACTION_START -> {
-                if (!hasConsent()) {
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-
-                if (!hasLocationPermission()) {
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildNotification()
-                )
-
-                startLocationUpdates()
-            }
+        if (action == ACTION_STOP || action == "STOP_TRACKING") {
+            stopTracking()
+            return START_NOT_STICKY
         }
+
+        if (!hasConsent() || !hasLocationPermission()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification()
+        )
+
+        startLocationUpdates()
 
         return START_STICKY
     }
 
     private fun hasConsent(): Boolean {
-        return getSharedPreferences(PREFS, MODE_PRIVATE)
-            .getBoolean(PREF_CONSENT, false)
+        return prefs.getBoolean(PREF_CONSENT, false)
     }
 
     private fun hasLocationPermission(): Boolean {
+
         val fine = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION
@@ -92,9 +117,20 @@ class LocationTrackingService : Service() {
         return fine || coarse
     }
 
+    private fun hasBackgroundPermission(): Boolean {
+        return Build.VERSION.SDK_INT < 29 ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+
     private fun startLocationUpdates() {
 
-        if (!hasConsent() || !hasLocationPermission()) {
+        if (!hasConsent() ||
+            !hasLocationPermission() ||
+            !hasBackgroundPermission()
+        ) {
             stopTracking()
             return
         }
@@ -128,7 +164,7 @@ class LocationTrackingService : Service() {
         try {
             fusedClient.requestLocationUpdates(
                 request,
-                locationCallback,
+                locationCallback!!,
                 mainLooper
             )
         } catch (e: SecurityException) {
@@ -137,9 +173,74 @@ class LocationTrackingService : Service() {
     }
 
     private fun uploadLocation(location: Location) {
-        // TODO: Add authenticated Supabase sync-device-location
-        // request here. Never upload without active consent.
-        // Do not place a service-role key inside this Android app.
+
+        if (!hasConsent()) return
+
+        val token = prefs.getString("access_token", null)
+            ?: return
+
+        val deviceId = prefs.getString("device_id", null)
+            ?: return
+
+        serviceScope.launch {
+
+            try {
+                if (!hasConsent()) return@launch
+
+                val batteryManager =
+                    getSystemService(BATTERY_SERVICE)
+                        as android.os.BatteryManager
+
+                val batteryLevel = batteryManager.getIntProperty(
+                    android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY
+                )
+
+                val body = JSONObject()
+                    .put("device_id", deviceId)
+                    .put("latitude", location.latitude)
+                    .put("longitude", location.longitude)
+                    .put("location_consent", true)
+                    .put(
+                        "battery_level",
+                        batteryLevel.coerceIn(0, 100)
+                    )
+
+                val request = Request.Builder()
+                    .url(
+                        "$BASE_URL/functions/v1/sync-device-location"
+                    )
+                    .post(
+                        body.toString().toRequestBody(
+                            "application/json".toMediaType()
+                        )
+                    )
+                    .header("apikey", API_KEY)
+                    .header("Authorization", "Bearer $token")
+                    .build()
+
+                http.newCall(request).execute().use { response ->
+
+                    if (!response.isSuccessful) {
+                        android.util.Log.e(
+                            "NEXGUARD",
+                            "Location sync failed: HTTP ${response.code}"
+                        )
+                    } else {
+                        android.util.Log.d(
+                            "NEXGUARD",
+                            "Location sync response received"
+                        )
+                    }
+                }
+
+            } catch (e: Exception) {
+                android.util.Log.e(
+                    "NEXGUARD",
+                    "Location sync error",
+                    e
+                )
+            }
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -175,28 +276,29 @@ class LocationTrackingService : Service() {
     }
 
     private fun createNotificationChannel() {
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "NEXGUARD Location Sharing",
                 NotificationManager.IMPORTANCE_LOW
             )
 
-            val manager = getSystemService(
-                NotificationManager::class.java
-            )
-
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
         }
     }
 
     private fun stopTracking() {
-        if (::locationCallback.isInitialized) {
-            fusedClient.removeLocationUpdates(locationCallback)
+
+        locationCallback?.let {
+            fusedClient.removeLocationUpdates(it)
         }
 
-        getSharedPreferences(PREFS, MODE_PRIVATE)
-            .edit()
+        locationCallback = null
+
+        prefs.edit()
             .putBoolean(PREF_CONSENT, false)
             .apply()
 
@@ -214,15 +316,14 @@ class LocationTrackingService : Service() {
         return null
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        // Foreground tracking remains governed by user consent.
-        super.onTaskRemoved(rootIntent)
-    }
-
     override fun onDestroy() {
-        if (::locationCallback.isInitialized) {
-            fusedClient.removeLocationUpdates(locationCallback)
+
+        locationCallback?.let {
+            fusedClient.removeLocationUpdates(it)
         }
+
+        serviceScope.cancel()
+
         super.onDestroy()
     }
 }
