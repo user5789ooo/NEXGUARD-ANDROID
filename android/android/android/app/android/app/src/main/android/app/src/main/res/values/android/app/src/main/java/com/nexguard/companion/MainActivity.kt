@@ -43,13 +43,15 @@ class MainActivity : AppCompatActivity() {
     private var accessToken: String? = null
     private var userEmail = ""
     private var syncInProgress = false
+    private var pendingLocationEnable = false
+    private var waitingForBackgroundSettings = false
+    private var suppressConsentListener = false
 
     private lateinit var emailInput: EditText
     private lateinit var continueButton: Button
     private lateinit var permissionButton: Button
     private lateinit var codeButton: Button
     private lateinit var consentCheck: CheckBox
-    private lateinit var startButton: Button
     private lateinit var stopButton: Button
     private lateinit var codeText: TextView
     private lateinit var statusText: TextView
@@ -81,13 +83,25 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        if (::statusText.isInitialized) {
-            consentCheck.isChecked =
-                prefs.getBoolean("location_consent", false)
+        if (!::statusText.isInitialized) return
 
-            updateScreen()
-            syncPermissionStatuses()
+        if (waitingForBackgroundSettings) {
+            waitingForBackgroundSettings = false
+
+            if (hasRequiredLocationPermissions()) {
+                saveConsentAndStart()
+            } else {
+                setConsentChecked(false)
+                toast("Enable Allow all the time location permission")
+            }
         }
+
+        setConsentChecked(
+            prefs.getBoolean("location_consent", false)
+        )
+
+        updateScreen()
+        syncPermissionStatuses()
     }
 
     private fun showScreen() {
@@ -145,26 +159,22 @@ class MainActivity : AppCompatActivity() {
             isChecked = prefs.getBoolean("location_consent", false)
 
             setOnCheckedChangeListener { _, checked ->
-                prefs.edit()
-                    .putBoolean("location_consent", checked)
-                    .apply()
+                if (suppressConsentListener) return@setOnCheckedChangeListener
 
-                if (!checked) {
+                if (checked) {
+                    enableLocationSharing()
+                } else {
                     stopTracking()
                 }
-
-                updateScreen()
             }
-        }
-
-        startButton = Button(this).apply {
-            text = "Start Location Sharing"
-            setOnClickListener { startTracking() }
         }
 
         stopButton = Button(this).apply {
             text = "Stop Location Sharing"
-            setOnClickListener { stopTracking() }
+            setOnClickListener {
+                setConsentChecked(false)
+                stopTracking()
+            }
         }
 
         statusText = TextView(this).apply {
@@ -179,7 +189,6 @@ class MainActivity : AppCompatActivity() {
             codeButton,
             codeText,
             consentCheck,
-            startButton,
             stopButton,
             statusText
         ).forEach { root.addView(it) }
@@ -283,13 +292,14 @@ class MainActivity : AppCompatActivity() {
             updateScreen()
             toast("Runtime permissions reviewed")
 
-            if (Build.VERSION.SDK_INT >= 30 &&
+            if (
+                Build.VERSION.SDK_INT >= 30 &&
                 ContextCompat.checkSelfPermission(
                     this,
                     Manifest.permission.ACCESS_BACKGROUND_LOCATION
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
-                toast("Enable Allow all the time in Location settings for background sharing")
+                toast("Enable Allow all the time in Location settings")
                 openAppSettings()
             }
 
@@ -312,8 +322,165 @@ class MainActivity : AppCompatActivity() {
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
             Uri.fromParts("package", packageName, null)
         )
-
         startActivity(intent)
+    }
+
+    private fun setConsentChecked(value: Boolean) {
+        suppressConsentListener = true
+        consentCheck.isChecked = value
+        suppressConsentListener = false
+    }
+
+    private fun hasRequiredLocationPermissions(): Boolean {
+
+        val locationGranted =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        val backgroundGranted =
+            Build.VERSION.SDK_INT < 29 ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        return locationGranted && backgroundGranted
+    }
+
+    private fun enableLocationSharing() {
+
+        if (accessToken.isNullOrBlank()) {
+            setConsentChecked(false)
+            toast("Complete device setup first")
+            return
+        }
+
+        val locationGranted =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (!locationGranted) {
+            setConsentChecked(false)
+            pendingLocationEnable = true
+
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
+                502
+            )
+            return
+        }
+
+        if (
+            Build.VERSION.SDK_INT >= 29 &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            setConsentChecked(false)
+            waitingForBackgroundSettings = true
+
+            toast("Allow all the time location access in Settings")
+            openAppSettings()
+            return
+        }
+
+        saveConsentAndStart()
+    }
+
+    private fun saveConsentAndStart() {
+
+        if (!hasRequiredLocationPermissions()) {
+            setConsentChecked(false)
+            toast("Required location permission is missing")
+            return
+        }
+
+        prefs.edit()
+            .putBoolean("location_consent", true)
+            .apply()
+
+        setConsentChecked(true)
+
+        startTracking()
+        syncPermissionStatuses()
+    }
+
+    private fun startTracking() {
+
+        if (!prefs.getBoolean("location_consent", false)) {
+            toast("Location consent is required")
+            return
+        }
+
+        if (accessToken.isNullOrBlank()) {
+            toast("Complete device setup first")
+            return
+        }
+
+        if (!hasRequiredLocationPermissions()) {
+            toast("Required location permissions are missing")
+            return
+        }
+
+        try {
+            val intent = Intent(
+                this,
+                LocationTrackingService::class.java
+            ).apply {
+                action = LocationTrackingService.ACTION_START
+            }
+
+            ContextCompat.startForegroundService(this, intent)
+
+            toast("Automatic location sharing enabled")
+
+        } catch (e: Exception) {
+            toast("Could not start sharing: ${e.message}")
+        }
+    }
+
+    private fun stopTracking() {
+
+        prefs.edit()
+            .putBoolean("location_consent", false)
+            .apply()
+
+        val intent = Intent(
+            this,
+            LocationTrackingService::class.java
+        ).apply {
+            action = LocationTrackingService.ACTION_STOP
+        }
+
+        try {
+            startService(intent)
+        } catch (e: Exception) {
+            android.util.Log.e(
+                "NEXGUARD",
+                "Could not stop service",
+                e
+            )
+        }
+
+        updateScreen()
+        toast("Location sharing stopped")
     }
 
     override fun onRequestPermissionsResult(
@@ -327,6 +494,23 @@ class MainActivity : AppCompatActivity() {
             grantResults
         )
 
+        if (requestCode == 502) {
+
+            if (pendingLocationEnable) {
+                pendingLocationEnable = false
+
+                if (hasRequiredLocationPermissions()) {
+                    saveConsentAndStart()
+                } else {
+                    setConsentChecked(false)
+                    toast("Location permission was not granted")
+                }
+            }
+
+            updateScreen()
+            syncPermissionStatuses()
+        }
+
         if (requestCode == 501) {
             updateScreen()
             syncPermissionStatuses()
@@ -335,7 +519,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun permissionStatus(permission: String): String {
 
-        if (ContextCompat.checkSelfPermission(
+        if (
+            ContextCompat.checkSelfPermission(
                 this,
                 permission
             ) == PackageManager.PERMISSION_GRANTED
@@ -393,6 +578,23 @@ class MainActivity : AppCompatActivity() {
             JSONObject()
                 .put("permission_name", "location")
                 .put("permission_status", locationStatus)
+        )
+
+        rows.put(
+            JSONObject()
+                .put(
+                    "permission_name",
+                    "background_location"
+                )
+                .put(
+                    "permission_status",
+                    if (Build.VERSION.SDK_INT < 29)
+                        "not_available"
+                    else
+                        permissionStatus(
+                            Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                        )
+                )
         )
 
         rows.put(
@@ -495,102 +697,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startTracking() {
-
-        if (!prefs.getBoolean("location_consent", false)) {
-            toast("Please provide location sharing consent first")
-            return
-        }
-
-        if (accessToken.isNullOrBlank()) {
-            toast("Complete device setup first")
-            return
-        }
-
-        val locationGranted =
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-
-        if (!locationGranted) {
-            toast("Grant location permission first")
-            requestNextPermission()
-            return
-        }
-
-        if (
-            Build.VERSION.SDK_INT >= 29 &&
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_BACKGROUND_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            toast("Enable Allow all the time in app Location settings")
-            openAppSettings()
-            return
-        }
-
-        try {
-            val intent = Intent(
-                this,
-                LocationTrackingService::class.java
-            ).apply {
-                action = LocationTrackingService.ACTION_START
-            }
-
-            ContextCompat.startForegroundService(this, intent)
-
-            toast("Location sharing started")
-
-        } catch (e: Exception) {
-            toast("Could not start tracking: ${e.message}")
-        }
-    }
-
-    private fun stopTracking() {
-
-        prefs.edit()
-            .putBoolean("location_consent", false)
-            .apply()
-
-        val intent = Intent(
-            this,
-            LocationTrackingService::class.java
-        ).apply {
-            action = LocationTrackingService.ACTION_STOP
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startService(intent)
-        } else {
-            startService(intent)
-        }
-
-        if (::consentCheck.isInitialized) {
-            consentCheck.setOnCheckedChangeListener(null)
-            consentCheck.isChecked = false
-            consentCheck.setOnCheckedChangeListener { _, checked ->
-                prefs.edit()
-                    .putBoolean("location_consent", checked)
-                    .apply()
-
-                if (!checked) {
-                    stopTracking()
-                }
-
-                updateScreen()
-            }
-        }
-
-        toast("Location sharing stopped")
-        updateScreen()
-    }
-
     private suspend fun apiPost(
         path: String,
         body: String,
@@ -624,66 +730,4 @@ class MainActivity : AppCompatActivity() {
                 error("HTTP ${response.code}: $responseBody")
             }
 
-            JSONObject(responseBody)
-        }
-    }
-
-    private fun updateScreen() {
-
-        val hasSession = !accessToken.isNullOrBlank()
-
-        continueButton.isEnabled = !hasSession
-        emailInput.isEnabled = !hasSession
-        permissionButton.isEnabled = hasSession
-        codeButton.isEnabled = hasSession
-
-        startButton.isEnabled =
-            hasSession &&
-            prefs.getBoolean("location_consent", false)
-
-        stopButton.isEnabled = true
-
-        statusText.text = buildString {
-            appendLine("Email: $userEmail")
-            appendLine("Device session: ${if (hasSession) "Ready" else "Not started"}")
-            appendLine("Device ID: $deviceId")
-            appendLine("Location: ${permissionStatus(Manifest.permission.ACCESS_FINE_LOCATION)}")
-            appendLine("Consent: ${prefs.getBoolean("location_consent", false)}")
-            appendLine(
-                "Background location: ${
-                    if (Build.VERSION.SDK_INT < 29) {
-                        "Not required"
-                    } else {
-                        permissionStatus(
-                            Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                        )
-                    }
-                }"
-            )
-        }
-    }
-
-    private fun busy(value: Boolean) {
-        continueButton.isEnabled =
-            !value && accessToken.isNullOrBlank()
-
-        permissionButton.isEnabled =
-            !value && !accessToken.isNullOrBlank()
-
-        codeButton.isEnabled =
-            !value && !accessToken.isNullOrBlank()
-    }
-
-    private fun toast(message: String) {
-        Toast.makeText(
-            this,
-            message,
-            Toast.LENGTH_LONG
-        ).show()
-    }
-
-    override fun onDestroy() {
-        scope.cancel()
-        super.onDestroy()
-    }
-}
+    
